@@ -122,7 +122,7 @@ class HarvestRushEnvironment(
         **kwargs: Any,
     ) -> HarvestRushObservation:
         """
-        Score the decision and end the episode.
+        Score the decision and end the episode. Call `reset()` first.
 
         Args:
             action ([`HarvestRushAction`]):
@@ -136,8 +136,7 @@ class HarvestRushEnvironment(
             `format_ok`, `mode`).
         """
         if self._row is None:
-            self.reset()
-        assert self._row is not None
+            raise RuntimeError("Call reset() before step().")
         self._state.step_count += 1
         info = self._row["info"]
         choice = action.choice if action.choice else parse_choice(action.message or "")

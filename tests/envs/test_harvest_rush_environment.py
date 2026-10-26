@@ -186,3 +186,58 @@ def test_websocket_single_turn_and_independent_sessions(pool):
                 assert (state.episode_id, state.step_count) == (episode, count)
             a.send_json({"type": "reset", "data": {"seed": 3}})
             assert parser._parse_result(a.receive_json()["data"]).done is False
+
+
+def test_step_before_reset_rejects_without_consuming_a_contact(pool):
+    env = HarvestRushEnvironment()
+    before = env.state.model_dump()
+    cursor = hre._CURSOR
+    with pytest.raises(RuntimeError, match=r"Call reset\(\) before step\(\)"):
+        env.step(HarvestRushAction(choice="continue"))
+    assert env.state.model_dump() == before
+    assert hre._CURSOR == cursor
+    assert env._row is None
+    obs = env.reset(seed=3)
+    result = env.step(HarvestRushAction(choice=pool[3]["answer"]))
+    assert result.prompt == obs.prompt
+    assert result.done is True and result.reward == 1.0
+
+
+def test_http_step_cannot_score_a_contact_from_another_request(pool):
+    from envs.harvest_rush_env.server.app import app
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as client:
+        assert client.post("/reset", json={"seed": 3}).status_code == 200
+        cursor = hre._CURSOR
+        # Legacy HTTP handlers create a fresh environment for each request.
+        with pytest.raises(RuntimeError, match=r"Call reset\(\) before step\(\)"):
+            client.post("/step", json={"action": {"choice": pool[3]["answer"]}})
+        assert hre._CURSOR == cursor
+
+
+def test_websocket_step_before_reset_rejects_and_session_can_recover(pool):
+    from envs.harvest_rush_env.client import HarvestRushEnv
+    from envs.harvest_rush_env.server.app import app
+    from fastapi.testclient import TestClient
+
+    parser = HarvestRushEnv(base_url="http://localhost:8000")
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            ws.send_json({"type": "state"})
+            before = ws.receive_json()["data"]
+            cursor = hre._CURSOR
+            ws.send_json({"type": "step", "data": {"choice": "continue"}})
+            error = ws.receive_json()
+            assert error["type"] == "error"
+            assert error["data"]["message"] == "Call reset() before step()."
+            assert "reward" not in error["data"]
+            ws.send_json({"type": "state"})
+            assert ws.receive_json()["data"] == before
+            assert hre._CURSOR == cursor
+            ws.send_json({"type": "reset", "data": {"seed": 3}})
+            reset = parser._parse_result(ws.receive_json()["data"])
+            ws.send_json({"type": "step", "data": {"choice": pool[3]["answer"]}})
+            result = parser._parse_result(ws.receive_json()["data"])
+            assert result.observation.prompt == reset.observation.prompt
+            assert result.done is True and result.reward == 1.0
