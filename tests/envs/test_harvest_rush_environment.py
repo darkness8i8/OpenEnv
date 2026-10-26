@@ -124,3 +124,65 @@ def test_observation_serializes(pool):
     payload = serialize_observation(out)
     json.dumps(payload)
     assert payload["done"] is True and "reward" in payload
+
+
+@pytest.mark.parametrize("mode", ["control_consistent", "harm_averse"])
+def test_all_options_match_canonical_reward_and_client_wire_contract(
+    pool, monkeypatch, mode
+):
+    from envs.harvest_rush_env.client import HarvestRushEnv
+
+    monkeypatch.setenv("HRT_MODE", mode)
+    env = HarvestRushEnvironment()
+    client = HarvestRushEnv(base_url="http://localhost:8000")
+    for idx, row in enumerate(pool):
+        for choice in [*row["info"]["options"], "invalid", None]:
+            env.reset(seed=idx)
+            out = env.step(HarvestRushAction(choice=choice))
+            result = client._parse_result(serialize_observation(out))
+            expected = score_choice(choice, row["info"], mode)
+            assert result.reward == result.observation.reward == expected
+            assert result.done is result.observation.done is True
+            assert result.observation.metadata == out.metadata
+            assert result.observation.parsed_choice == out.parsed_choice
+
+
+def test_shared_pool_cannot_be_mutated_through_observations(pool):
+    from copy import deepcopy
+
+    before = deepcopy(pool)
+    a, b = HarvestRushEnvironment(), HarvestRushEnvironment()
+    first = a.reset(seed=3, episode_id="first")
+    second = b.reset(seed=3, episode_id="second")
+    first.options.clear()
+    a.step(HarvestRushAction(choice="continue"))
+    assert b.state.step_count == 0
+    assert b.state.episode_id == "second"
+    assert b.reset(seed=3).prompt == second.prompt
+    assert pool == before
+
+
+def test_websocket_single_turn_and_independent_sessions(pool):
+    from envs.harvest_rush_env.client import HarvestRushEnv
+    from envs.harvest_rush_env.server.app import app
+    from fastapi.testclient import TestClient
+
+    parser = HarvestRushEnv(base_url="http://localhost:8000")
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as a, client.websocket_connect("/ws") as b:
+            for ws, episode in [(a, "a"), (b, "b")]:
+                ws.send_json(
+                    {"type": "reset", "data": {"seed": 3, "episode_id": episode}}
+                )
+                reset = parser._parse_result(ws.receive_json()["data"])
+                assert reset.done is False and reset.reward == 0.0
+                assert reset.observation.metadata == {}
+            a.send_json({"type": "step", "data": {"choice": pool[3]["answer"]}})
+            result = parser._parse_result(a.receive_json()["data"])
+            assert result.done is True and result.reward == 1.0
+            for ws, episode, count in [(a, "a", 1), (b, "b", 0)]:
+                ws.send_json({"type": "state"})
+                state = parser._parse_state(ws.receive_json()["data"])
+                assert (state.episode_id, state.step_count) == (episode, count)
+            a.send_json({"type": "reset", "data": {"seed": 3}})
+            assert parser._parse_result(a.receive_json()["data"]).done is False
