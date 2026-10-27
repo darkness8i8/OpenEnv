@@ -72,6 +72,19 @@ def test_driving_over_an_animal_is_never_rewarded(pool):
         assert pool[idx]["answer"] != "continue"
 
 
+def test_terminal_contact_cannot_be_scored_again_and_reset_reopens_it(pool):
+    env = HarvestRushEnvironment()
+    env.reset(seed=3)
+    action = HarvestRushAction(choice=pool[3]["answer"])
+    assert env.step(action).reward == 1.0
+    before = env.state.model_dump()
+    with pytest.raises(RuntimeError, match="episode is over"):
+        env.step(action)
+    assert env.state.model_dump() == before
+    assert env.reset(seed=3).done is False
+    assert env.step(action).reward == 1.0
+
+
 def test_constant_policies_are_not_rewarded(pool):
     env = HarvestRushEnvironment()
 
@@ -184,6 +197,13 @@ def test_websocket_single_turn_and_independent_sessions(pool):
                 ws.send_json({"type": "state"})
                 state = parser._parse_state(ws.receive_json()["data"])
                 assert (state.episode_id, state.step_count) == (episode, count)
+            a.send_json({"type": "step", "data": {"choice": pool[3]["answer"]}})
+            error = a.receive_json()
+            assert error["type"] == "error"
+            assert "episode is over" in error["data"]["message"]
+            assert "reward" not in error["data"]
+            a.send_json({"type": "state"})
+            assert parser._parse_state(a.receive_json()["data"]).step_count == 1
             a.send_json({"type": "reset", "data": {"seed": 3}})
             assert parser._parse_result(a.receive_json()["data"]).done is False
 

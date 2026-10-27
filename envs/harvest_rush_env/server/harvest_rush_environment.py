@@ -137,6 +137,8 @@ class HarvestRushEnvironment(
         """
         if self._row is None:
             raise RuntimeError("Call reset() before step().")
+        if self._state.step_count:
+            raise RuntimeError("The episode is over; call reset() before step().")
         self._state.step_count += 1
         info = self._row["info"]
         choice = action.choice if action.choice else parse_choice(action.message or "")
